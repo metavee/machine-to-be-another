@@ -11,14 +11,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // The deprecated Google VR (Cardboard) SDK was only ever published to
-        // JCenter, which JFrog keeps online as a read-only archive. Scope it to
-        // just that group so no other dependency is pulled from this legacy host.
-        maven {
-            url 'https://jcenter.bintray.com/'
-            content {
-                includeGroup 'com.google.vr'
-            }
+        // The deprecated Google VR (Cardboard) SDK is no longer hosted on any
+        // Maven repository, so its AAR is vendored under app/libs and consumed
+        // from this local flat directory.
+        flatDir {
+            dirs "$settingsDir/app/libs"
         }
     }
 }

@@ -32,7 +32,9 @@ android {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
-    // Google VR (Cardboard/Daydream) SDK. Deprecated by Google but the last
-    // published release still works for Cardboard-style stereo rendering.
-    implementation 'com.google.vr:sdk-base:1.190.0'
+    // Google VR (Cardboard) SDK. Deprecated by Google and no longer hosted on
+    // any Maven repository, so the self-contained AAR is vendored in app/libs
+    // (see settings.gradle flatDir). It still works for Cardboard-style stereo
+    // rendering. The AAR bundles its own native libraries and dependencies.
+    implementation(name: 'sdk-base-1.200.0', ext: 'aar')
 }
