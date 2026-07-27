@@ -12,11 +12,37 @@ When being worn like this, it becomes much more difficult to perform basic tasks
 
 Take utmost caution around stairs, tripping hazards, etc. Use in a safe, controlled environment only.
 
+## Downloading a pre-built APK
+
+Every push (and manual run) of the **Android CI** GitHub Actions workflow builds a
+debug APK. To grab it:
+
+1. Open the **Actions** tab on GitHub and click the latest **Android CI** run.
+2. Scroll to the **Artifacts** section at the bottom of the run summary.
+3. Download **MachineToBeAnother-debug-apk** (a `.zip` containing `app-debug.apk`),
+   unzip it, and sideload the APK onto your device.
+
+You can also trigger a build on demand via **Actions → Android CI → Run workflow**.
+
+## Building locally
+
+The project uses the Gradle wrapper, so no separate Gradle install is required:
+
+```
+./gradlew assembleDebug
+```
+
+The APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+
 ## Requirements
 
-This was built using Android Studio 2.3.3 and Gradle 3.3.
+It was originally built with Android Studio 2.3.3 / Gradle 3.3, and has since been
+updated to build with a current Android Gradle Plugin (8.5) and AndroidX so it runs
+on modern devices.
 
-It requires a phone that supports the Google VR SDK (Android 4.4 'Kit Kat', API level 19 or higher), and a VR headset that has been modded to expose the phone camera, as shown below on a MINKANAK Google Cardboard V2:
+It requires a phone running Android 5.0 'Lollipop' (API level 21) or higher with
+Google VR (Cardboard) support, and a VR headset that has been modded to expose the
+phone camera, as shown below on a MINKANAK Google Cardboard V2:
 
 ![Cardboard VR headset modified to expose the camera](modded-cardboard.jpg)
 
