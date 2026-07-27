@@ -14,15 +14,17 @@ Take utmost caution around stairs, tripping hazards, etc. Use in a safe, control
 
 ## Downloading a pre-built APK
 
-Every push (and manual run) of the **Android CI** GitHub Actions workflow builds a
-debug APK. To grab it:
+The **Android CI** GitHub Actions workflow builds a debug APK on every push.
 
-1. Open the **Actions** tab on GitHub and click the latest **Android CI** run.
-2. Scroll to the **Artifacts** section at the bottom of the run summary.
-3. Download **MachineToBeAnother-debug-apk** (a `.zip` containing `app-debug.apk`),
-   unzip it, and sideload the APK onto your device.
+**Easiest (direct download, ideal for a phone):** each build publishes the APK to
+the rolling [`debug-latest`](../../releases/tag/debug-latest) pre-release. Open the
+**Releases** page, tap **MachineToBeAnother-debug.apk**, and it downloads directly
+(no zip) so Android can install it straight away.
 
-You can also trigger a build on demand via **Actions → Android CI → Run workflow**.
+**Alternative (workflow artifact):** open the **Actions** tab, click the latest
+**Android CI** run, and download **MachineToBeAnother-debug-apk** from the
+**Artifacts** section. GitHub always serves artifacts as a `.zip`, so you'll need to
+unzip it to get the APK.
 
 ## Building locally
 
