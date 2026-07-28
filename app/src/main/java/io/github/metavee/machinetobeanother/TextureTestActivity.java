@@ -46,6 +46,7 @@ import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
@@ -129,6 +130,8 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
 
         Webcam = Camera.open();
 
+        configureCamera(Webcam);
+
         try {
             Webcam.setPreviewTexture(WebcamSurface);
             Webcam.startPreview();
@@ -146,6 +149,81 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
         rectTextureCoordinates.put(RECT_TEXTURE_COORDS);
         rectTextureCoordinates.position(0);
 
+    }
+
+    /**
+    * Tunes the camera so the preview matches what the stock camera app shows: a preview size that
+    * uses the sensor's full field of view (so it doesn't look zoomed in), and continuous
+    * autofocus (so it re-focuses on its own instead of drifting out of focus).
+    */
+    private void configureCamera(Camera camera) {
+        Camera.Parameters params = camera.getParameters();
+
+        Camera.Size previewSize = chooseWidestPreviewSize(params);
+        if (previewSize != null) {
+            params.setPreviewSize(previewSize.width, previewSize.height);
+        }
+
+        List<String> focusModes = params.getSupportedFocusModes();
+        if (focusModes != null) {
+            if (focusModes.contains(Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO)) {
+                params.setFocusMode(Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO);
+            } else if (focusModes.contains(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE)) {
+                params.setFocusMode(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE);
+            }
+        }
+
+        camera.setParameters(params);
+    }
+
+    /**
+    * Picks the preview size that preserves the most field of view. The renderer center-crops each
+    * frame to a square (see WorldLayoutData.getRectTextureCoords), so the widest result comes from
+    * matching the sensor's native aspect ratio — approximated here by the largest supported picture
+    * size, which always uses the full sensor. Among preview sizes with that aspect ratio we take the
+    * largest; failing that, the largest preview size overall.
+    */
+    private Camera.Size chooseWidestPreviewSize(Camera.Parameters params) {
+        List<Camera.Size> previewSizes = params.getSupportedPreviewSizes();
+        if (previewSizes == null || previewSizes.isEmpty()) {
+            return null;
+        }
+
+        float targetAspect = -1f;
+        List<Camera.Size> pictureSizes = params.getSupportedPictureSizes();
+        if (pictureSizes != null && !pictureSizes.isEmpty()) {
+            Camera.Size largestPicture = null;
+            for (Camera.Size s : pictureSizes) {
+                if (largestPicture == null || (long) s.width * s.height > (long) largestPicture.width * largestPicture.height) {
+                    largestPicture = s;
+                }
+            }
+            targetAspect = (float) largestPicture.width / largestPicture.height;
+        }
+
+        Camera.Size best = null;
+        for (Camera.Size s : previewSizes) {
+            if (targetAspect > 0f) {
+                float aspect = (float) s.width / s.height;
+                if (Math.abs(aspect - targetAspect) > 0.05f) {
+                    continue;
+                }
+            }
+            if (best == null || (long) s.width * s.height > (long) best.width * best.height) {
+                best = s;
+            }
+        }
+
+        if (best == null) {
+            // No preview size matched the sensor aspect ratio; fall back to the largest available.
+            for (Camera.Size s : previewSizes) {
+                if (best == null || (long) s.width * s.height > (long) best.width * best.height) {
+                    best = s;
+                }
+            }
+        }
+
+        return best;
     }
 
     /**
