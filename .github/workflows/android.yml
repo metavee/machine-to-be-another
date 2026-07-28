@@ -1,0 +1,74 @@
+name: Android CI
+
+on:
+  push:
+    # "claude/**" is included so that pushes to the AI-assisted working
+    # branches also produce a downloadable release (see the publish step below).
+    branches: [ "master", "main", "claude/**" ]
+  pull_request:
+    branches: [ "master", "main" ]
+  # Allow running the workflow manually from the Actions tab (available once
+  # this workflow exists on the default branch).
+  workflow_dispatch:
+
+# "write" is required so the build can publish the APK as a GitHub Release asset.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install required Android SDK packages
+        run: sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Give the APK a friendly name
+        run: cp app/build/outputs/apk/debug/app-debug.apk MachineToBeAnother-debug.apk
+
+      - name: Upload debug APK as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Downloadable (as a .zip) from the workflow run page under "Artifacts".
+          name: MachineToBeAnother-debug-apk
+          path: MachineToBeAnother-debug.apk
+          if-no-files-found: error
+
+      - name: Publish the APK to a rolling pre-release
+        # Skip on pull_request builds; publish on branch pushes and manual runs.
+        # This attaches the raw .apk to a GitHub Release so it can be downloaded
+        # directly (no zip) from the Releases page — convenient for sideloading
+        # onto a phone.
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Recreate the rolling "debug-latest" release so it points at this
+          # commit and carries the freshly built APK as its only asset.
+          gh release delete debug-latest --yes --cleanup-tag || true
+          gh release create debug-latest MachineToBeAnother-debug.apk \
+            --title "Latest debug build" \
+            --notes "Automated debug build from commit ${{ github.sha }}." \
+            --prerelease \
+            --target "${{ github.sha }}"

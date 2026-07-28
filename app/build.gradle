@@ -1,0 +1,40 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.github.metavee.machinetobeanother'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "io.github.metavee.machinetobeanother"
+        // Raised from the original API 19 to the minimum supported by the modern
+        // AndroidX libraries. Still covers essentially every device in use today.
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    // Google VR (Cardboard) SDK. Deprecated by Google and no longer hosted on
+    // any Maven repository, so the self-contained AAR is vendored in app/libs
+    // (see settings.gradle flatDir). It still works for Cardboard-style stereo
+    // rendering. The AAR bundles its own native libraries and dependencies.
+    implementation(name: 'sdk-base-1.200.0', ext: 'aar')
+}

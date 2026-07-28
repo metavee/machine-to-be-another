@@ -1,0 +1,24 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        // The deprecated Google VR (Cardboard) SDK is no longer hosted on any
+        // Maven repository, so its AAR is vendored under app/libs and consumed
+        // from this local flat directory.
+        flatDir {
+            dirs "$settingsDir/app/libs"
+        }
+    }
+}
+
+rootProject.name = "MachineToBeAnother"
+include ':app'

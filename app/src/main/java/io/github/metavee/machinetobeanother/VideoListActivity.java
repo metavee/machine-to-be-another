@@ -2,7 +2,7 @@ package io.github.metavee.machinetobeanother;
 
 import android.content.Intent;
 import android.os.Environment;
-import android.support.v7.app.AppCompatActivity;
+import androidx.appcompat.app.AppCompatActivity;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.AdapterView;
@@ -26,7 +26,13 @@ public class VideoListActivity extends AppCompatActivity implements AdapterView.
         setContentView(R.layout.activity_video_list);
 
         File outdir = getApplicationContext().getExternalFilesDir(Environment.DIRECTORY_MOVIES);
-        items = outdir.listFiles();
+        // listFiles() returns null if the directory does not exist yet (e.g. a
+        // fresh install that has never recorded a video), which would crash the
+        // ArrayAdapter below, so fall back to an empty list.
+        items = outdir != null ? outdir.listFiles() : null;
+        if (items == null) {
+            items = new File[0];
+        }
 
         itemsAdapter = new ArrayAdapter<File>(this, R.layout.simple_list_item_1, items);
 
