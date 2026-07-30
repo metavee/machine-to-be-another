@@ -16,10 +16,30 @@ android {
         versionName "1.0"
     }
 
+    signingConfigs {
+        release {
+            // Real release-signing credentials are supplied through environment
+            // variables in CI (see .github/workflows/android.yml). When they are
+            // absent — local builds, or before any signing secrets are added to
+            // the repo — the release build falls back to the debug signing key
+            // below, so the produced APK is still installable for sideloading.
+            def storeFilePath = System.getenv("RELEASE_STORE_FILE")
+            if (storeFilePath) {
+                storeFile file(storeFilePath)
+                storePassword System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Use the real release key when its credentials are present,
+            // otherwise sign with the debug key so the APK still installs.
+            signingConfig System.getenv("RELEASE_STORE_FILE") ? signingConfigs.release : signingConfigs.getByName("debug")
         }
     }
 
