@@ -8,3 +8,8 @@
 /captures
 .externalNativeBuild
 .cxx
+
+# Signing keystores must never be committed — the release keystore lives only
+# on the developer's machine and in the RELEASE_KEYSTORE_BASE64 repo secret.
+*.keystore
+*.jks

@@ -51,11 +51,22 @@ the AAR references no legacy support-library classes.
 
 ## CI / releases
 
-`.github/workflows/android.yml` builds the debug APK on pushes (to `master`, `main`,
-and `claude/**`), PRs, and manual dispatch. Each non-PR build publishes the APK to a
-rolling **`debug-latest`** GitHub pre-release (direct-download `.apk`, no zip) and also
-uploads it as a zipped workflow artifact. Publishing needs `contents: write`
-permission and uses the `gh` CLI.
+`.github/workflows/android.yml` builds on pushes (to `master`, `main`, and
+`claude/**`), PRs, and manual dispatch. There are two paths:
+
+- **Working branches (`claude/**`), PRs, and manual runs** build a **debug** APK.
+  Non-PR runs publish it to a rolling **`debug-latest`** GitHub *pre-release*
+  (direct-download `.apk`, no zip) and upload it as a zipped workflow artifact.
+- **Merges to `main`/`master`** build a **release** APK and publish it as a full
+  (non-pre) GitHub **Release** with a stable, versioned tag
+  (`v<versionName>-build.<run#>`), marked as the repo's "Latest release".
+
+Publishing needs `contents: write` permission and uses the `gh` CLI.
+
+The release build is signed. Add repository secrets `RELEASE_STORE_FILE`,
+`RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, and `RELEASE_KEY_PASSWORD` to sign
+with a real upload/release key; without them the release build falls back to the
+debug signing key (see `app/build.gradle`) so the APK still installs for sideloading.
 
 ## Permissions model (modern Android)
 

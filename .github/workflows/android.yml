@@ -3,7 +3,8 @@ name: Android CI
 on:
   push:
     # "claude/**" is included so that pushes to the AI-assisted working
-    # branches also produce a downloadable release (see the publish step below).
+    # branches also produce a downloadable (debug) build (see the publish
+    # steps below). Pushes to "main"/"master" instead cut a full release.
     branches: [ "master", "main", "claude/**" ]
   pull_request:
     branches: [ "master", "main" ]
@@ -18,6 +19,20 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    # Whether this run targets the default branch (a merge to main/master).
+    # Such runs cut a full, versioned release from a signed release build.
+    # Everything else (PRs, "claude/**" pushes, manual runs off a working
+    # branch) produces a debug build and the rolling "debug-latest" pre-release.
+    env:
+      IS_RELEASE: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+      # The release keystore, stored base64-encoded as a repository secret. A
+      # GitHub secret is a string, not a file, so the keystore is decoded back
+      # into a file at build time (see "Decode the release keystore" below).
+      # Surfaced as a job-level env so the decode step's `if:` can test whether
+      # it is configured — when it is absent the release build simply falls
+      # back to the debug signing key (see app/build.gradle).
+      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
 
     steps:
       - name: Check out the code
@@ -41,13 +56,21 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      # ------------------------------------------------------------------
+      # Debug build path — PRs, "claude/**" pushes and manual working-branch
+      # runs. Publishes the rolling "debug-latest" pre-release for easy
+      # sideloading of in-progress work.
+      # ------------------------------------------------------------------
       - name: Build debug APK
+        if: env.IS_RELEASE == 'false'
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Give the APK a friendly name
+      - name: Give the debug APK a friendly name
+        if: env.IS_RELEASE == 'false'
         run: cp app/build/outputs/apk/debug/app-debug.apk MachineToBeAnother-debug.apk
 
       - name: Upload debug APK as a workflow artifact
+        if: env.IS_RELEASE == 'false'
         uses: actions/upload-artifact@v4
         with:
           # Downloadable (as a .zip) from the workflow run page under "Artifacts".
@@ -55,20 +78,84 @@ jobs:
           path: MachineToBeAnother-debug.apk
           if-no-files-found: error
 
-      - name: Publish the APK to a rolling pre-release
-        # Skip on pull_request builds; publish on branch pushes and manual runs.
-        # This attaches the raw .apk to a GitHub Release so it can be downloaded
-        # directly (no zip) from the Releases page — convenient for sideloading
-        # onto a phone.
-        if: github.event_name != 'pull_request'
+      - name: Publish the debug APK to a rolling pre-release
+        # Skip on pull_request builds; publish on working-branch pushes and
+        # manual runs. Attaches the raw .apk to a GitHub pre-release so it can
+        # be downloaded directly (no zip) for sideloading onto a phone.
+        if: env.IS_RELEASE == 'false' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Recreate the rolling "debug-latest" release so it points at this
+          # Recreate the rolling "debug-latest" pre-release so it points at this
           # commit and carries the freshly built APK as its only asset.
           gh release delete debug-latest --yes --cleanup-tag || true
           gh release create debug-latest MachineToBeAnother-debug.apk \
             --title "Latest debug build" \
             --notes "Automated debug build from commit ${{ github.sha }}." \
             --prerelease \
+            --target "${{ github.sha }}"
+
+      # ------------------------------------------------------------------
+      # Release build path — a merge to main/master. Builds a signed release
+      # APK and publishes it as a full (non-pre) GitHub Release with a stable,
+      # versioned tag.
+      # ------------------------------------------------------------------
+      - name: Decode the release keystore
+        # Only when this is a release run and the keystore secret is actually
+        # configured. Writes the keystore to a temp file and exports its path
+        # as RELEASE_STORE_FILE, which app/build.gradle keys the real signing
+        # config off. If the secret is missing this step is skipped and the
+        # build falls back to the debug key.
+        if: env.IS_RELEASE == 'true' && env.RELEASE_KEYSTORE_BASE64 != ''
+        run: |
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        if: env.IS_RELEASE == 'true'
+        env:
+          # Real release-signing credentials, if configured as repository
+          # secrets. RELEASE_STORE_FILE is exported by the decode step above
+          # when a keystore secret is present; when it is unset the build signs
+          # with the debug key instead (see app/build.gradle) so the APK still
+          # installs.
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Give the release APK a friendly name
+        if: env.IS_RELEASE == 'true'
+        run: cp app/build/outputs/apk/release/app-release.apk MachineToBeAnother-release.apk
+
+      - name: Upload release APK as a workflow artifact
+        if: env.IS_RELEASE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MachineToBeAnother-release-apk
+          path: MachineToBeAnother-release.apk
+          if-no-files-found: error
+
+      - name: Work out the release version and tag
+        if: env.IS_RELEASE == 'true'
+        id: version
+        run: |
+          # Derive the human version from the app's versionName and make the tag
+          # unique per build by appending the workflow run number, so repeated
+          # merges each get their own release instead of colliding.
+          version_name=$(grep -oP 'versionName\s+"\K[^"]+' app/build.gradle | head -n1)
+          echo "tag=v${version_name}-build.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "title=MachineToBeAnother ${version_name} (build ${{ github.run_number }})" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release APK to a full GitHub Release
+        if: env.IS_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A full (non-pre) release with a stable, versioned tag. --latest keeps
+          # the repo's "Latest release" pointer on the newest build.
+          gh release create "${{ steps.version.outputs.tag }}" MachineToBeAnother-release.apk \
+            --title "${{ steps.version.outputs.title }}" \
+            --notes "Automated release build from commit ${{ github.sha }}." \
+            --latest \
             --target "${{ github.sha }}"
