@@ -6,8 +6,10 @@ Guidance for working in this repository.
 
 An Android VR/AR perception experiment (a low-budget "The Machine To Be Another").
 It renders the phone's rear camera to the screen in stereo for a Cardboard headset;
-tapping the trigger left/right-mirrors the image. Single-module Android app, written
-in Java, package `io.github.metavee.machinetobeanother`.
+tapping the trigger (a screen tap) left/right-mirrors the image. Stereo is drawn by a
+small in-app renderer whose per-eye geometry comes from a Cardboard viewer profile, so
+different headsets can be calibrated (see the VR-rendering section below). Single-module
+Android app, written in Java, package `io.github.metavee.machinetobeanother`.
 
 ## Build & run
 
@@ -34,20 +36,36 @@ There are no unit tests in the project. "Verifying a change builds" means a clea
 - `compileSdk` / `targetSdk` **34**, `minSdk` **21**
 - AndroidX (the app was migrated off the legacy `android.support.*` libraries)
 
-## ⚠️ The Google VR SDK is vendored on purpose — do not un-vendor it
+## VR rendering & viewer calibration (no VR SDK)
 
-The Google VR (Cardboard) SDK is consumed from a **local AAR**:
-`app/libs/sdk-base-1.200.0.aar`, wired up via a `flatDir` repository in
-`settings.gradle` and referenced by name in `app/build.gradle`.
+The app used to render stereo through the deprecated Google VR (GVR/Cardboard) SDK,
+consumed from a vendored fat AAR. **That dependency has been removed** — there is no
+VR SDK anymore, and no `app/libs` AAR. Do **not** re-introduce `com.google.vr:sdk-base`
+(it resolves from no Maven repo) or the current NDK Cardboard SDK unless there's a
+concrete need; stereo is handled in-app.
 
-This is deliberate. The SDK is **no longer hosted on any Maven repository**: it only
-ever lived on JCenter, which JFrog has repointed to redirect to Maven Central, where
-the artifacts never existed. Google Maven doesn't have it either. **Do not "clean this
-up" by replacing the local AAR with a `com.google.vr:sdk-base:<version>` coordinate —
-no version resolves remotely and the build will break.** The AAR is a self-contained
-fat AAR (bundles its internal deps and native libs for arm64-v8a/armeabi-v7a/x86), so
-it needs no transitive Maven dependencies. Jetifier is intentionally *not* enabled —
-the AAR references no legacy support-library classes.
+How it works now:
+
+- `TextureTestActivity` hosts a plain `GLSurfaceView` and implements
+  `GLSurfaceView.Renderer` itself. Each frame it draws the camera passthrough quad once
+  per eye into the left/right half of the surface. There is intentionally **no head
+  tracking** — the image is pinned in front of the viewer, matching the original app.
+- Per-eye projection comes from a **Cardboard viewer profile** (`CardboardProfile`): the
+  same lens/screen geometry the official Cardboard app uses, encoded in the QR code on a
+  headset (`https://google.com/cardboard/cfg?p=<base64 DeviceParams protobuf>`).
+  `CardboardProfile` parses that protobuf with a tiny hand-rolled wire reader (no
+  protobuf runtime dependency), persists the raw bytes in `SharedPreferences`, and
+  computes an asymmetric frustum per eye so each eye's image is centered under its lens
+  and scaled to the headset. A built-in Cardboard v2 default is used until one is saved.
+- Calibration input is currently **manual**: the "Calibrate viewer" button in
+  `MainActivity` prompts for the profile URL and saves it. (A camera-based QR scanner is
+  a deliberate future enhancement — see the backlog.)
+- Lens **barrel distortion** is applied by `DistortionRenderer`: each eye is rendered to
+  an off-screen FBO, then drawn to the screen through a pre-distorted mesh built from the
+  profile's `distortion_coefficients` (Cardboard's `r*(1+k1*r²+k2*r⁴)` model, inverted
+  per mesh vertex). With zero coefficients it degrades to an identity blit. The distortion
+  math has been verified to build but should be **eyeballed on a real headset** and tuned
+  if needed — it wasn't validated on-device.
 
 ## CI / releases
 
@@ -72,14 +90,16 @@ debug signing key (see `app/build.gradle`) so the APK still installs for sideloa
 
 Only `CAMERA` is declared, and it's requested at runtime in `MainActivity`. Recordings
 are written to the app's own external files dir (`getExternalFilesDir`), which needs no
-storage permission. The manifest strips the `READ/WRITE_EXTERNAL_STORAGE` permissions
-the VR AAR contributes via `tools:node="remove"`. Every activity sets `android:exported`
-explicitly. Keep this minimal set — don't reintroduce storage or phone-state permissions.
+storage permission. (The `READ/WRITE_EXTERNAL_STORAGE` strips that used to counter the
+VR AAR's manifest contributions are gone with the AAR.) Every activity sets
+`android:exported` explicitly. Keep this minimal set — don't reintroduce storage or
+phone-state permissions.
 
 ## Key files
 
-- `app/src/main/java/.../MainActivity.java` — launcher menu + camera permission request
-- `app/src/main/java/.../TextureTestActivity.java` — the GVR stereo renderer (view / record / playback)
+- `app/src/main/java/.../MainActivity.java` — launcher menu + camera permission + "Calibrate viewer" URL entry
+- `app/src/main/java/.../TextureTestActivity.java` — the custom GLSurfaceView stereo renderer (view / record / playback)
+- `app/src/main/java/.../CardboardProfile.java` — Cardboard viewer profile: QR/protobuf parse, persistence, per-eye frustum
 - `app/src/main/java/.../VideoListActivity.java` — recorded-video picker
 - `app/src/main/java/.../WorldLayoutData.java` — quad geometry + L/R-flip texture coords
 - `app/src/main/res/raw/rect_*.glsl` — pass-through OES-texture shaders
@@ -89,5 +109,9 @@ explicitly. Keep this minimal set — don't reintroduce storage or phone-state p
 The app builds and runs but still leans on deprecated APIs. Durable follow-ups:
 
 - Replace the deprecated `android.hardware.Camera` API with Camera2/CameraX.
-- Move off the frozen GVR SDK — current Cardboard SDK, or a small custom stereo renderer —
-  so the build no longer depends on a vendored, unmaintained AAR.
+- Add an in-app **QR scanner** for calibration so users can scan a viewer's code directly
+  instead of pasting its URL (e.g. ZXing, which needs minSdk 24, or ML Kit / Google Code
+  Scanner).
+- **Verify/tune the lens distortion on a real headset.** `DistortionRenderer` builds and
+  is correct in principle, but its output has not been eyeballed on-device; confirm lines
+  look straight through the lenses and adjust if the model/coefficients need refining.

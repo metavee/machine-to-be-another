@@ -27,4 +27,11 @@
         android:onClick="startPlayback"
         android:text="Playback" />
 
+    <Button
+        android:id="@+id/calibrate_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:onClick="calibrate"
+        android:text="Calibrate viewer" />
+
 </androidx.appcompat.widget.LinearLayoutCompat>
