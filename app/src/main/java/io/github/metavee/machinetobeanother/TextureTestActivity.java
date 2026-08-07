@@ -25,6 +25,7 @@ import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.util.DisplayMetrics;
@@ -36,6 +37,9 @@ import android.view.WindowManager;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -360,6 +364,11 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
         // do this for us). Cleared automatically when the activity is no longer visible.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+        // Draw edge-to-edge (behind the system bars and into the display cutout) so the GL
+        // surface covers the entire physical screen. The per-eye geometry assumes the full
+        // screen, so any inset would shift the image off the lenses and waste screen area.
+        enableImmersiveMode();
+
         glView = (GLSurfaceView) findViewById(R.id.gl_view);
         glView.setEGLContextClientVersion(2);
         glView.setEGLConfigChooser(8, 8, 8, 8, 16, 8);
@@ -387,6 +396,30 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
             gestureDetector.onTouchEvent(event);
             return true;
         });
+    }
+
+    /** Hides the system bars and lets the window extend into the display cutout, so the GL
+     *  surface fills the entire physical screen. */
+    private void enableImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            getWindow().getAttributes().layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        WindowInsetsControllerCompat controller =
+                WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        controller.hide(WindowInsetsCompat.Type.systemBars());
+        controller.setSystemBarsBehavior(
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            // System bars can reappear (e.g. after a transient swipe); re-hide them.
+            enableImmersiveMode();
+        }
     }
 
     @Override
@@ -465,13 +498,15 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
         float eyeAspect = (surfaceWidth / 2.0f) / surfaceHeight;
 
         // Physical screen size in meters, needed to map the profile's metric distances onto
-        // this display. DisplayMetrics DPI is an approximation of what GVR derived from its
-        // per-device database, but is good enough here and can be off on a few devices.
+        // this display. We size it from the actual GL surface (which, in immersive mode, spans
+        // the full physical screen) times the reported DPI. Using the surface pixels rather
+        // than DisplayMetrics.widthPixels avoids the system-bar insets that would otherwise
+        // shrink and shift the mapping.
         DisplayMetrics dm = getResources().getDisplayMetrics();
         float xdpi = dm.xdpi > 0 ? dm.xdpi : dm.densityDpi;
         float ydpi = dm.ydpi > 0 ? dm.ydpi : dm.densityDpi;
-        float screenWidthMeters = dm.widthPixels / xdpi * 0.0254f;
-        float screenHeightMeters = dm.heightPixels / ydpi * 0.0254f;
+        float screenWidthMeters = surfaceWidth / xdpi * 0.0254f;
+        float screenHeightMeters = surfaceHeight / ydpi * 0.0254f;
 
         for (int eye = 0; eye < 2; eye++) {
             CardboardProfile.EyeParams ep = (profile != null)
@@ -501,7 +536,7 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
             }
         }
 
-        logCalibrationDiagnostics(dm, xdpi, ydpi, screenWidthMeters, screenHeightMeters);
+        logCalibrationDiagnostics(xdpi, ydpi, screenWidthMeters, screenHeightMeters);
     }
 
     /**
@@ -509,7 +544,7 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
     * help diagnose whether the DisplayMetrics-based physical size is accurate. Remove once the
     * calibration is dialed in.
     */
-    private void logCalibrationDiagnostics(DisplayMetrics dm, float xdpi, float ydpi,
+    private void logCalibrationDiagnostics(float xdpi, float ydpi,
                                           float screenWidthMeters, float screenHeightMeters) {
         if (diagnosticsShown || eyeParamsArr[0] == null) {
             return;
@@ -519,9 +554,9 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
         double hFov = Math.toDegrees(Math.atan(ep.sxLeft) + Math.atan(ep.sxRight));
         double vFov = Math.toDegrees(Math.atan(ep.sxBottom) + Math.atan(ep.sxTop));
         final String msg = String.format(java.util.Locale.US,
-                "screen %.0fx%.0f mm (%dx%d px, dpi %.0fx%.0f); left-eye FOV H=%.0f° V=%.0f°",
+                "screen %.0fx%.0f mm (surface %dx%d px, dpi %.0fx%.0f); left-eye FOV H=%.0f° V=%.0f°",
                 screenWidthMeters * 1000f, screenHeightMeters * 1000f,
-                dm.widthPixels, dm.heightPixels, xdpi, ydpi, hFov, vFov);
+                surfaceWidth, surfaceHeight, xdpi, ydpi, hFov, vFov);
         Log.i(TAG, "Calibration diagnostics: " + msg);
         runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
     }
