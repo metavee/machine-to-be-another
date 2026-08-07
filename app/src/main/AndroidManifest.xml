@@ -11,6 +11,13 @@
     -->
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!--
+        INTERNET is used only to follow the redirects of a scanned/pasted Cardboard
+        calibration short link (e.g. goo.gl/…) to the underlying profile URL. See
+        MainActivity#resolveDeviceParams.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <uses-feature
         android:glEsVersion="0x00020000"
         android:required="true" />

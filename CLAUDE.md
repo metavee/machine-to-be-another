@@ -58,8 +58,11 @@ How it works now:
   computes an asymmetric frustum per eye so each eye's image is centered under its lens
   and scaled to the headset. A built-in Cardboard v2 default is used until one is saved.
 - Calibration input is currently **manual**: the "Calibrate viewer" button in
-  `MainActivity` prompts for the profile URL and saves it. (A camera-based QR scanner is
-  a deliberate future enhancement — see the backlog.)
+  `MainActivity` prompts for the profile URL and saves it. A **QR short link** (e.g.
+  `goo.gl/…`) can be pasted directly — `MainActivity#resolveDeviceParams` follows the HTTP
+  redirects on a background thread until it reaches the `cfg?p=` URL (stopping before the
+  "get Cardboard" landing page). (A camera-based QR scanner is a deliberate future
+  enhancement — see the backlog.)
 - Lens **barrel distortion** is applied by `DistortionRenderer`: each eye is rendered to
   an off-screen FBO, then drawn to the screen through a pre-distorted mesh built from the
   profile's `distortion_coefficients` (Cardboard's `r*(1+k1*r²+k2*r⁴)` model, inverted
@@ -88,12 +91,13 @@ debug signing key (see `app/build.gradle`) so the APK still installs for sideloa
 
 ## Permissions model (modern Android)
 
-Only `CAMERA` is declared, and it's requested at runtime in `MainActivity`. Recordings
-are written to the app's own external files dir (`getExternalFilesDir`), which needs no
-storage permission. (The `READ/WRITE_EXTERNAL_STORAGE` strips that used to counter the
-VR AAR's manifest contributions are gone with the AAR.) Every activity sets
-`android:exported` explicitly. Keep this minimal set — don't reintroduce storage or
-phone-state permissions.
+Two permissions are declared: `CAMERA` (requested at runtime in `MainActivity`) and
+`INTERNET`. INTERNET is used **only** to follow a calibration short link's redirects to
+the underlying profile URL (`MainActivity#resolveDeviceParams`). Recordings are written
+to the app's own external files dir (`getExternalFilesDir`), which needs no storage
+permission. (The `READ/WRITE_EXTERNAL_STORAGE` strips that used to counter the VR AAR's
+manifest contributions are gone with the AAR.) Every activity sets `android:exported`
+explicitly. Keep this minimal set — don't reintroduce storage or phone-state permissions.
 
 ## Key files
 
