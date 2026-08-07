@@ -19,23 +19,28 @@ package io.github.metavee.machinetobeanother;
 import android.content.Intent;
 import android.graphics.SurfaceTexture;
 import android.hardware.Camera;
-import android.media.CamcorderProfile;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
+import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.GestureDetector;
+import android.view.MotionEvent;
 import android.view.Surface;
+import android.view.WindowManager;
+import android.widget.Toast;
 
-import com.google.vr.sdk.base.AndroidCompat;
-import com.google.vr.sdk.base.Eye;
-import com.google.vr.sdk.base.GvrActivity;
-import com.google.vr.sdk.base.GvrView;
-import com.google.vr.sdk.base.HeadTransform;
-import com.google.vr.sdk.base.Viewport;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
@@ -59,8 +64,13 @@ import javax.microedition.khronos.opengles.GL10;
  *  http://www.learnopengles.com/android-lesson-four-introducing-basic-texturing/
  *  https://developers.google.com/vr/android/samples/treasure-hunt
  *  https://github.com/chauthai/glcam
+ *
+ * Migrated off the deprecated Google VR (GVR) SDK to a small custom stereo renderer
+ * built on a plain GLSurfaceView. Stereo split, per-eye projection and (later) lens
+ * distortion are driven by the scanned Cardboard viewer profile instead of GVR's
+ * device-wide, unconfigurable calibration. See CardboardProfile.
  */
-public class TextureTestActivity extends GvrActivity implements GvrView.StereoRenderer {
+public class TextureTestActivity extends AppCompatActivity implements GLSurfaceView.Renderer {
 
     private MediaRecorder MR;
 
@@ -77,9 +87,14 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
 
     private boolean LR_inversion = false;
 
+    // True when the live camera is shown as a life-size passthrough (full frame on an
+    // FOV-sized quad) rather than center-cropped onto the square quad.
+    private boolean lifeSize = false;
+
     private Camera Webcam;
     private SurfaceTexture WebcamSurface;
-    // forward-facing eye view
+    // forward-facing eye view. This renderer intentionally does not head-track: the
+    // passthrough image is pinned in front of the viewer, matching the original app.
     private final float[] fixed_eye_view = {
             1f, 0f, 0f, 0f,
             0f, 1f, 0f, 0f,
@@ -97,11 +112,35 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
     private static final float Z_FAR = 100.0f;
 
     private static final float CAMERA_Z = 0.01f;
-    private static final float TIME_DELTA = 0.3f;
+
+    // Default per-eye vertical field of view (degrees), used until a scanned viewer
+    // profile supplies real FOV angles (Phase 2). Roughly matches a Cardboard v2 view.
+    private static final float DEFAULT_FOV_Y = 80.0f;
 
     private static final int COORDS_PER_VERTEX = 3;
 
     private static final float MAX_MODEL_DISTANCE = 7.0f;
+
+    private GLSurfaceView glView;
+
+    // Current surface size, set in onSurfaceChanged and used to split the viewport
+    // into a left and right half.
+    private int surfaceWidth;
+    private int surfaceHeight;
+
+    // Per-eye projection matrices: index 0 = left eye, 1 = right eye.
+    private final float[][] eyePerspective = new float[][] {new float[16], new float[16]};
+
+    // Scanned (or default) Cardboard viewer calibration driving the per-eye projections.
+    private CardboardProfile profile;
+
+    // Log/show the computed calibration geometry once, to help diagnose FOV/positioning.
+    private boolean diagnosticsShown = false;
+
+    // Lens barrel-distortion post-process, and the per-eye rendering/distortion parameters
+    // (rendered vs. physical-screen FOV tangents) it needs to build its distortion mesh.
+    private DistortionRenderer distortionRenderer;
+    private final CardboardProfile.EyeParams[] eyeParamsArr = new CardboardProfile.EyeParams[2];
 
     private FloatBuffer rectVertices;
 
@@ -119,13 +158,16 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
 
     private float[] camera;
     private float[] view;
-    private float[] headView;
     private float[] modelViewProjection;
     private float[] modelView;
 
-    private float[] headRotation;
-
     public void startCamera(int texture) {
+        if (Webcam != null) {
+            // Already running (e.g. onSurfaceCreated started it before the queued
+            // resume runnable fired). Nothing to do.
+            return;
+        }
+
         WebcamSurface = new SurfaceTexture(texture);
 
         Webcam = Camera.open();
@@ -139,15 +181,33 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
             Log.w("TextureTestActivity", "startCamera");
         }
 
-        Camera.Size dims = Webcam.getParameters().getPreviewSize();
-        float h = dims.height;
-        float w = dims.width;
-        Webcam_AR = h / w;
+        Camera.Parameters camParams = Webcam.getParameters();
+        Camera.Size dims = camParams.getPreviewSize();
+        Webcam_AR = (float) dims.height / dims.width;
 
-        float[] RECT_TEXTURE_COORDS = WorldLayoutData.getRectTextureCoords(Webcam_AR, this.LR_inversion);
+        float camHFov = camParams.getHorizontalViewAngle();
+        float camVFov = camParams.getVerticalViewAngle();
 
-        rectTextureCoordinates.put(RECT_TEXTURE_COORDS);
-        rectTextureCoordinates.position(0);
+        if (camHFov > 0f && camHFov < 180f && camVFov > 0f && camVFov < 180f) {
+            // Life-size passthrough: show the full camera frame on a quad sized so the camera's
+            // field of view maps 1:1 to the eye, so objects appear their real-world size.
+            float distance = Math.abs(modelPosition[2] + WorldLayoutData.RECT_Z - CAMERA_Z);
+            float halfX = distance * (float) Math.tan(Math.toRadians(camHFov / 2.0));
+            float halfY = distance * (float) Math.tan(Math.toRadians(camVFov / 2.0));
+
+            rectVertices.position(0);
+            rectVertices.put(WorldLayoutData.getRectCoords(halfX, halfY));
+            rectVertices.position(0);
+
+            lifeSize = true;
+            rectTextureCoordinates.put(WorldLayoutData.getFullTextureCoords(this.LR_inversion));
+            rectTextureCoordinates.position(0);
+        } else {
+            // No reliable camera FOV: fall back to center-cropping onto the default square quad.
+            lifeSize = false;
+            rectTextureCoordinates.put(WorldLayoutData.getRectTextureCoords(Webcam_AR, this.LR_inversion));
+            rectTextureCoordinates.position(0);
+        }
 
     }
 
@@ -289,14 +349,12 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
     }
 
     /**
-    * Sets the view to our GvrView and initializes the transformation matrices we will use
+    * Sets up the GLSurfaceView and initializes the transformation matrices we will use
     * to render our scene.
     */
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        initializeGvrView();
 
         modelRect = new float[16];
         camera = new float[16];
@@ -305,8 +363,6 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
         modelView = new float[16];
         // Model first appears directly in front of user.
         modelPosition = new float[] {0.0f, 0.0f, -MAX_MODEL_DISTANCE / 2.0f};
-        headRotation = new float[4];
-        headView = new float[16];
 
         // get mode
         Intent intent = getIntent();
@@ -315,73 +371,235 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
         if (mode == MODE_PLAYBACK) {
             media_path = intent.getStringExtra("filename");
         }
+
+        // Load the scanned viewer calibration (or the built-in default) that drives the
+        // per-eye stereo geometry.
+        profile = CardboardProfile.load(this);
+
+        initializeGlView();
     }
 
-    public void initializeGvrView() {
+    public void initializeGlView() {
         setContentView(R.layout.common_ui);
 
-        GvrView gvrView = (GvrView) findViewById(R.id.gvr_view);
-        gvrView.setEGLConfigChooser(8, 8, 8, 8, 16, 8);
+        // Keep the screen awake while the stereo view is active (the removed GvrView used to
+        // do this for us). Cleared automatically when the activity is no longer visible.
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        gvrView.setRenderer(this);
-        gvrView.setTransitionViewEnabled(true);
+        // Draw edge-to-edge (behind the system bars and into the display cutout) so the GL
+        // surface covers the entire physical screen. The per-eye geometry assumes the full
+        // screen, so any inset would shift the image off the lenses and waste screen area.
+        enableImmersiveMode();
 
-        // Enable Cardboard-trigger feedback with Daydream headsets. This is a simple way of supporting
-        // Daydream controller input for basic interactions using the existing Cardboard trigger API.
-        gvrView.enableCardboardTriggerEmulation();
+        glView = (GLSurfaceView) findViewById(R.id.gl_view);
+        glView.setEGLContextClientVersion(2);
+        glView.setEGLConfigChooser(8, 8, 8, 8, 16, 8);
+        // Keep the GL context (and its textures) across pause/resume where supported,
+        // so we don't have to rebuild everything each time the app is resumed.
+        glView.setPreserveEGLContextOnPause(true);
+        glView.setRenderer(this);
+        glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
 
-        if (gvrView.setAsyncReprojectionEnabled(true)) {
-            // Async reprojection decouples the app framerate from the display framerate,
-            // allowing immersive interaction even at the throttled clockrates set by
-            // sustained performance mode.
-            AndroidCompat.setSustainedPerformanceMode(this, true);
+        // A tap anywhere is the trigger, replacing the Cardboard magnet/button. Modern
+        // Cardboard viewers press a conductive lever onto the screen, which the system
+        // already reports as a touch, so this also handles physical viewer buttons.
+        final GestureDetector gestureDetector =
+                new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+                    @Override
+                    public boolean onSingleTapUp(MotionEvent e) {
+                        onTriggerTap();
+                        return true;
+                    }
+                });
+        // Return true so we keep receiving the whole gesture: if we returned the detector's
+        // result, the initial DOWN (false from SimpleOnGestureListener) would stop delivery
+        // and onSingleTapUp would never fire.
+        glView.setOnTouchListener((v, event) -> {
+            gestureDetector.onTouchEvent(event);
+            return true;
+        });
+    }
+
+    /** Hides the system bars and lets the window extend into the display cutout, so the GL
+     *  surface fills the entire physical screen. */
+    private void enableImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            getWindow().getAttributes().layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
-
-        setGvrView(gvrView);
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        WindowInsetsControllerCompat controller =
+                WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        controller.hide(WindowInsetsCompat.Type.systemBars());
+        controller.setSystemBarsBehavior(
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
     }
 
     @Override
-    public void onPause() {
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            // System bars can reappear (e.g. after a transient swipe); re-hide them.
+            enableImmersiveMode();
+        }
+    }
+
+    @Override
+    protected void onPause() {
         super.onPause();
         if (mode == MODE_RECORD && recording) {
             this.stopRecording();
         }
 
+        if (glView != null) {
+            glView.onPause();
+        }
+
         if (mode != MODE_PLAYBACK) {
-            Webcam.release();
+            if (Webcam != null) {
+                Webcam.release();
+                Webcam = null;
+            }
         } else {
             if (MP != null) {
                 if (MP.isPlaying()) {
                     MP.stop();
                 }
                 MP.release();
+                MP = null;
             }
         }
 
     }
 
     @Override
-    public void onResume() {
+    protected void onResume() {
         super.onResume();
-        if (mode != MODE_PLAYBACK && textureDataHandle != 0) {
-            this.startCamera(textureDataHandle);
+        if (glView != null) {
+            glView.onResume();
+            // Re-acquire the camera / media player on the GL thread once the surface
+            // exists. If the GL context was lost, onSurfaceCreated has already done this
+            // and the guards below make the queued call a no-op.
+            glView.queueEvent(() -> {
+                if (textureDataHandle == 0) {
+                    return;
+                }
+                if (mode == MODE_PLAYBACK) {
+                    if (MP == null) {
+                        startPlayback(textureDataHandle);
+                    }
+                } else {
+                    if (Webcam == null) {
+                        startCamera(textureDataHandle);
+                    }
+                }
+            });
         }
+    }
 
-        if (mode == MODE_PLAYBACK) {
-            if (MP != null) {
-                MP.start();
+    @Override
+    public void onSurfaceChanged(GL10 gl, int width, int height) {
+        Log.i(TAG, "onSurfaceChanged");
+        surfaceWidth = width;
+        surfaceHeight = height;
+        updateEyeProjections();
+    }
+
+    /**
+    * Recomputes the per-eye projection matrices for the current surface size.
+    *
+    * <p>The geometry comes from the scanned viewer {@link CardboardProfile}: an asymmetric
+    * frustum per eye derived from the lens/screen layout, so each eye's image is centered
+    * under its lens and scaled to the headset. If the profile geometry is unusable (e.g. the
+    * device reports no physical DPI), we fall back to a symmetric default perspective.
+    */
+    private void updateEyeProjections() {
+        if (surfaceWidth <= 0 || surfaceHeight <= 0) {
+            return;
+        }
+        float eyeAspect = (surfaceWidth / 2.0f) / surfaceHeight;
+
+        // Physical screen size in meters, needed to map the profile's metric distances onto
+        // this display. We size it from the actual GL surface (which, in immersive mode, spans
+        // the full physical screen) times the DPI. Using the surface pixels rather than
+        // DisplayMetrics.widthPixels avoids the system-bar insets that would otherwise shrink
+        // and shift the mapping.
+        float[] dpi = physicalDpi();
+        float xdpi = dpi[0];
+        float ydpi = dpi[1];
+        float screenWidthMeters = surfaceWidth / xdpi * 0.0254f;
+        float screenHeightMeters = surfaceHeight / ydpi * 0.0254f;
+
+        for (int eye = 0; eye < 2; eye++) {
+            CardboardProfile.EyeParams ep = (profile != null)
+                    ? profile.eyeParams(eye, screenWidthMeters, screenHeightMeters)
+                    : null;
+            eyeParamsArr[eye] = ep;
+            if (ep != null) {
+                // Render at the distorted (wider) FOV; the distortion mesh brings it back to
+                // the physical screen FOV.
+                Matrix.frustumM(eyePerspective[eye], 0,
+                        -ep.txLeft * Z_NEAR, ep.txRight * Z_NEAR,
+                        -ep.txBottom * Z_NEAR, ep.txTop * Z_NEAR, Z_NEAR, Z_FAR);
+            } else {
+                // Symmetric default frustum when the profile geometry is unusable.
+                float t = (float) Math.tan(Math.toRadians(DEFAULT_FOV_Y / 2.0)) * Z_NEAR;
+                float r = t * eyeAspect;
+                Matrix.frustumM(eyePerspective[eye], 0, -r, r, -t, t, Z_NEAR, Z_FAR);
             }
         }
+
+        if (distortionRenderer != null) {
+            if (eyeParamsArr[0] != null && eyeParamsArr[1] != null) {
+                distortionRenderer.configure(surfaceWidth / 2, surfaceHeight, eyeParamsArr,
+                        profile != null ? profile.distortionCoeffs : null);
+            } else {
+                distortionRenderer.disable();
+            }
+        }
+
+        logCalibrationDiagnostics(xdpi, ydpi, screenWidthMeters, screenHeightMeters);
     }
 
-    @Override
-    public void onRendererShutdown() {
-    Log.i(TAG, "onRendererShutdown");
+    /**
+    * The physical screen DPI to use. Some phones report an inaccurate {@code
+    * DisplayMetrics.xdpi/ydpi} (e.g. the Pixel 6 reports ~429 for a true 411 ppi panel),
+    * which throws off the whole FOV/geometry. Correct known devices here (the true panel
+    * ppi); fall back to the reported DPI otherwise. Extend this list if a device's calibration
+    * looks slightly zoomed/off — the calibration diagnostics toast shows the model and DPI.
+    */
+    private float[] physicalDpi() {
+        switch (Build.MODEL) {
+            case "Pixel 6": return new float[] {411f, 411f};
+            case "Pixel 7": return new float[] {416f, 416f};
+            default:
+                DisplayMetrics dm = getResources().getDisplayMetrics();
+                float x = dm.xdpi > 0 ? dm.xdpi : dm.densityDpi;
+                float y = dm.ydpi > 0 ? dm.ydpi : dm.densityDpi;
+                return new float[] {x, y};
+        }
     }
 
-    @Override
-    public void onSurfaceChanged(int width, int height) {
-    Log.i(TAG, "onSurfaceChanged");
+    /**
+    * Logs (and briefly shows) the derived screen geometry and per-eye field of view once, to
+    * help diagnose whether the physical size is accurate. Remove once the calibration is
+    * dialed in.
+    */
+    private void logCalibrationDiagnostics(float xdpi, float ydpi,
+                                          float screenWidthMeters, float screenHeightMeters) {
+        if (diagnosticsShown || eyeParamsArr[0] == null) {
+            return;
+        }
+        diagnosticsShown = true;
+        CardboardProfile.EyeParams ep = eyeParamsArr[0];
+        double hFov = Math.toDegrees(Math.atan(ep.sxLeft) + Math.atan(ep.sxRight));
+        double vFov = Math.toDegrees(Math.atan(ep.sxBottom) + Math.atan(ep.sxTop));
+        final String msg = String.format(java.util.Locale.US,
+                "%s: screen %.0fx%.0f mm (surface %dx%d px, dpi %.0fx%.0f); left-eye FOV H=%.0f° V=%.0f°",
+                Build.MODEL, screenWidthMeters * 1000f, screenHeightMeters * 1000f,
+                surfaceWidth, surfaceHeight, xdpi, ydpi, hFov, vFov);
+        Log.i(TAG, "Calibration diagnostics: " + msg);
+        runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
     }
 
     /**
@@ -393,7 +611,7 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
     * @param config The EGL configuration used when creating the surface.
     */
     @Override
-    public void onSurfaceCreated(EGLConfig config) {
+    public void onSurfaceCreated(GL10 gl, EGLConfig config) {
         Log.i(TAG, "onSurfaceCreated");
         GLES20.glClearColor(0.1f, 0.1f, 0.1f, 0.5f); // Dark background so text shows up well.
 
@@ -433,6 +651,13 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
         textureDataHandle = createTexture();
 
         checkGLError("Texture loading");
+
+        // Set up the lens-distortion post-process. The off-screen buffer and distortion
+        // meshes are (re)built later in onSurfaceChanged, once the surface size is known.
+        distortionRenderer = new DistortionRenderer(this);
+        distortionRenderer.init();
+
+        checkGLError("Distortion program");
 
         updateModelPosition();
 
@@ -480,50 +705,77 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
     }
 
     /**
-    * Prepares OpenGL ES before we draw a frame.
-    *
-    * @param headTransform The head transformation in the new frame.
+    * Draws a frame: updates the camera texture, then draws the scene once per eye into
+    * its half of the surface.
     */
     @Override
-    public void onNewFrame(HeadTransform headTransform) {
+    public void onDrawFrame(GL10 gl) {
         // update webcam stream
-        WebcamSurface.updateTexImage();
+        if (WebcamSurface != null) {
+            WebcamSurface.updateTexImage();
+        }
 
-        // Build the camera matrix and apply it to the ModelView.
+        // Build the camera matrix (shared by both eyes; this renderer does not head-track).
         Matrix.setLookAtM(camera, 0, 0.0f, 0.0f, CAMERA_Z, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f);
 
-        headTransform.getHeadView(headView, 0);
+        int halfWidth = surfaceWidth / 2;
+        boolean distort = distortionRenderer != null && distortionRenderer.isReady();
 
-        headTransform.getQuaternion(headRotation, 0);
+        if (distort) {
+            // Clear the on-screen buffer once; each eye is rendered off-screen and then
+            // drawn back through the distortion mesh.
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
+            checkGLError("onDrawFrame");
 
-        checkGLError("onReadyToDraw");
+            for (int eye = 0; eye < 2; eye++) {
+                distortionRenderer.bindEyeBuffer();
+                buildEyeMvp(eye);
+                drawRect();
+                distortionRenderer.renderEye(eye, eye == 0 ? 0 : halfWidth);
+            }
+        } else {
+            // Fallback (distortion not ready): draw each eye straight to its half.
+            GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
+            checkGLError("onDrawFrame");
+
+            for (int eye = 0; eye < 2; eye++) {
+                GLES20.glViewport(eye == 0 ? 0 : halfWidth, 0, halfWidth, surfaceHeight);
+                buildEyeMvp(eye);
+                drawRect();
+            }
+        }
+
+        drawAlignmentLine();
     }
 
     /**
-    * Draws a frame for an eye.
-    *
-    * @param eye The eye to render. Includes all required transformations.
+    * Draws a thin white vertical line down the center of the screen, between the two eyes, to
+    * help center the phone in the Cardboard viewer.
     */
-    @Override
-    public void onDrawEye(Eye eye) {
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
-
-        checkGLError("colorParam");
-
-        // Hold eye view facing forward, rather than using eye.getEyeView()
-        Matrix.multiplyMM(view, 0, fixed_eye_view, 0, camera, 0);
-
-        // Build the ModelView and ModelViewProjection matrices
-        // for calculating rect position and light.
-        float[] perspective = eye.getPerspective(Z_NEAR, Z_FAR);
-        Matrix.multiplyMM(modelView, 0, view, 0, modelRect, 0);
-        Matrix.multiplyMM(modelViewProjection, 0, perspective, 0, modelView, 0);
-        drawRect();
+    private void drawAlignmentLine() {
+        int lineWidth = Math.max(2, surfaceWidth / 400);
+        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+        GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glScissor((surfaceWidth - lineWidth) / 2, 0, lineWidth, surfaceHeight);
+        GLES20.glClearColor(1f, 1f, 1f, 1f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glClearColor(0.1f, 0.1f, 0.1f, 0.5f); // restore the normal frame clear color
     }
 
-    @Override
-    public void onFinishFrame(Viewport viewport) {}
+    /**
+    * Builds the ModelViewProjection matrix for one eye (forward-facing, no head tracking).
+    *
+    * @param eye 0 for the left eye, 1 for the right eye.
+    */
+    private void buildEyeMvp(int eye) {
+        Matrix.multiplyMM(view, 0, fixed_eye_view, 0, camera, 0);
+        Matrix.multiplyMM(modelView, 0, view, 0, modelRect, 0);
+        Matrix.multiplyMM(modelViewProjection, 0, eyePerspective[eye], 0, modelView, 0);
+    }
 
     /**
     * Draw the rect.
@@ -566,16 +818,20 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
     }
 
     /**
-    * Called when the Cardboard trigger is pulled.
+    * Called when the viewer trigger (a screen tap) fires.
     */
-    @Override
-    public void onCardboardTrigger() {
-        Log.i(TAG, "onCardboardTrigger");
+    private void onTriggerTap() {
+        Log.i(TAG, "onTriggerTap");
         switch (mode) {
             case MODE_VIEW:
-                this.toggleView();
+                // toggleView mutates the GL texture-coordinate buffer, so run it on the
+                // GL thread.
+                if (glView != null) {
+                    glView.queueEvent(this::toggleView);
+                }
                 break;
             case MODE_RECORD:
+                // Camera / MediaRecorder work stays off the GL thread.
                 this.toggleRecord();
                 break;
         }
@@ -584,9 +840,11 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
     private void toggleView() {
         this.LR_inversion = !this.LR_inversion;
 
-        float[] RECT_TEXTURE_COORDS = WorldLayoutData.getRectTextureCoords(Webcam_AR, this.LR_inversion);
+        float[] texCoords = lifeSize
+                ? WorldLayoutData.getFullTextureCoords(this.LR_inversion)
+                : WorldLayoutData.getRectTextureCoords(Webcam_AR, this.LR_inversion);
 
-        rectTextureCoordinates.put(RECT_TEXTURE_COORDS);
+        rectTextureCoordinates.put(texCoords);
         rectTextureCoordinates.position(0);
     }
 
@@ -599,6 +857,10 @@ public class TextureTestActivity extends GvrActivity implements GvrView.StereoRe
     }
 
     private void startPlayback(int texture) {
+        if (MP != null) {
+            return;
+        }
+
         MP = new MediaPlayer();
         try {
             MP.setDataSource(media_path);

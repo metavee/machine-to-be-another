@@ -17,4 +17,13 @@
 
     <style name="AppTheme.PopupOverlay" parent="ThemeOverlay.AppCompat.Light" />
 
+    <!--
+        Fullscreen, no-action-bar theme for the stereo view (replaces the VrActivityTheme
+        that the removed Google VR AAR used to provide).
+    -->
+    <style name="StereoActivityTheme" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+
 </resources>

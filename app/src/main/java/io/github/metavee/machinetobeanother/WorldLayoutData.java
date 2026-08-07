@@ -52,14 +52,50 @@ public final class WorldLayoutData {
         }
     }
 
-    public static final float[] RECT_COORDS = new float[] {
-        // Front face
-        -1.75f, 1.75f, 1.0f,
-        -1.75f, -1.75f, 1.0f,
-        1.75f, 1.75f, 1.0f,
-        -1.75f, -1.75f, 1.0f,
-        1.75f, -1.75f, 1.0f,
-        1.75f, 1.75f, 1.0f,
-    };
+    // Z (in model space) of the passthrough quad. Combined with the model translation and the
+    // camera position it fixes the quad's distance from the eye, which the life-size passthrough
+    // uses to size the quad to the camera's field of view.
+    public static final float RECT_Z = 1.0f;
+
+    public static final float[] RECT_COORDS = getRectCoords(1.75f, 1.75f);
+
+    /** Builds the quad vertices (two triangles) with the given half-width and half-height. */
+    public static float[] getRectCoords(float halfX, float halfY) {
+        return new float[] {
+            -halfX,  halfY, RECT_Z,
+            -halfX, -halfY, RECT_Z,
+             halfX,  halfY, RECT_Z,
+            -halfX, -halfY, RECT_Z,
+             halfX, -halfY, RECT_Z,
+             halfX,  halfY, RECT_Z,
+        };
+    }
+
+    /**
+     * Texture coordinates that show the full camera frame (no crop), matching the vertex winding
+     * of {@link #getRectCoords}. Used by the life-size passthrough, where the quad itself is
+     * sized to the camera's field of view instead of cropping the image to a square.
+     */
+    public static float[] getFullTextureCoords(boolean LR_invert) {
+        if (LR_invert) {
+            return new float[] {
+                    1f, 0f,
+                    1f, 1f,
+                    0f, 0f,
+                    1f, 1f,
+                    0f, 1f,
+                    0f, 0f
+            };
+        } else {
+            return new float[] {
+                    0f, 0f,
+                    0f, 1f,
+                    1f, 0f,
+                    0f, 1f,
+                    1f, 1f,
+                    1f, 0f
+            };
+        }
+    }
 
 }

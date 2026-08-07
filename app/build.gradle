@@ -47,14 +47,12 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+    buildToolsVersion '34.0.0'
 }
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
-    // Google VR (Cardboard) SDK. Deprecated by Google and no longer hosted on
-    // any Maven repository, so the self-contained AAR is vendored in app/libs
-    // (see settings.gradle flatDir). It still works for Cardboard-style stereo
-    // rendering. The AAR bundles its own native libraries and dependencies.
-    implementation(name: 'sdk-base-1.200.0', ext: 'aar')
+    // Stereo rendering and Cardboard viewer calibration are handled by a small
+    // in-app renderer (see TextureTestActivity / CardboardProfile) — no VR SDK.
 }
