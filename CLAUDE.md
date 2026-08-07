@@ -50,6 +50,15 @@ How it works now:
   `GLSurfaceView.Renderer` itself. Each frame it draws the camera passthrough quad once
   per eye into the left/right half of the surface. There is intentionally **no head
   tracking** — the image is pinned in front of the viewer, matching the original app.
+  The activity runs **edge-to-edge/immersive** (system bars hidden, drawn into the
+  cutout) so the GL surface covers the whole physical screen; the per-eye geometry assumes
+  the full screen, and it keeps the screen awake (`FLAG_KEEP_SCREEN_ON`). A thin white
+  vertical **alignment line** is drawn down the screen center. A **screen tap** is the
+  trigger (toggles the left/right image mirror); there is no magnet/NFC.
+- The live camera is shown as a **life-size passthrough**: the full frame is drawn on a
+  quad sized (from `Camera#getHorizontalViewAngle`/`getVerticalViewAngle`) so the camera's
+  field of view maps 1:1 to the eye, so objects appear their real-world size instead of
+  being center-cropped/magnified. Playback still center-crops onto the square quad.
 - Per-eye projection comes from a **Cardboard viewer profile** (`CardboardProfile`): the
   same lens/screen geometry the official Cardboard app uses, encoded in the QR code on a
   headset (`https://google.com/cardboard/cfg?p=<base64 DeviceParams protobuf>`).

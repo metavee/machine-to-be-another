@@ -87,6 +87,10 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
 
     private boolean LR_inversion = false;
 
+    // True when the live camera is shown as a life-size passthrough (full frame on an
+    // FOV-sized quad) rather than center-cropped onto the square quad.
+    private boolean lifeSize = false;
+
     private Camera Webcam;
     private SurfaceTexture WebcamSurface;
     // forward-facing eye view. This renderer intentionally does not head-track: the
@@ -177,15 +181,33 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
             Log.w("TextureTestActivity", "startCamera");
         }
 
-        Camera.Size dims = Webcam.getParameters().getPreviewSize();
-        float h = dims.height;
-        float w = dims.width;
-        Webcam_AR = h / w;
+        Camera.Parameters camParams = Webcam.getParameters();
+        Camera.Size dims = camParams.getPreviewSize();
+        Webcam_AR = (float) dims.height / dims.width;
 
-        float[] RECT_TEXTURE_COORDS = WorldLayoutData.getRectTextureCoords(Webcam_AR, this.LR_inversion);
+        float camHFov = camParams.getHorizontalViewAngle();
+        float camVFov = camParams.getVerticalViewAngle();
 
-        rectTextureCoordinates.put(RECT_TEXTURE_COORDS);
-        rectTextureCoordinates.position(0);
+        if (camHFov > 0f && camHFov < 180f && camVFov > 0f && camVFov < 180f) {
+            // Life-size passthrough: show the full camera frame on a quad sized so the camera's
+            // field of view maps 1:1 to the eye, so objects appear their real-world size.
+            float distance = Math.abs(modelPosition[2] + WorldLayoutData.RECT_Z - CAMERA_Z);
+            float halfX = distance * (float) Math.tan(Math.toRadians(camHFov / 2.0));
+            float halfY = distance * (float) Math.tan(Math.toRadians(camVFov / 2.0));
+
+            rectVertices.position(0);
+            rectVertices.put(WorldLayoutData.getRectCoords(halfX, halfY));
+            rectVertices.position(0);
+
+            lifeSize = true;
+            rectTextureCoordinates.put(WorldLayoutData.getFullTextureCoords(this.LR_inversion));
+            rectTextureCoordinates.position(0);
+        } else {
+            // No reliable camera FOV: fall back to center-cropping onto the default square quad.
+            lifeSize = false;
+            rectTextureCoordinates.put(WorldLayoutData.getRectTextureCoords(Webcam_AR, this.LR_inversion));
+            rectTextureCoordinates.position(0);
+        }
 
     }
 
@@ -799,9 +821,11 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
     private void toggleView() {
         this.LR_inversion = !this.LR_inversion;
 
-        float[] RECT_TEXTURE_COORDS = WorldLayoutData.getRectTextureCoords(Webcam_AR, this.LR_inversion);
+        float[] texCoords = lifeSize
+                ? WorldLayoutData.getFullTextureCoords(this.LR_inversion)
+                : WorldLayoutData.getRectTextureCoords(Webcam_AR, this.LR_inversion);
 
-        rectTextureCoordinates.put(RECT_TEXTURE_COORDS);
+        rectTextureCoordinates.put(texCoords);
         rectTextureCoordinates.position(0);
     }
 
