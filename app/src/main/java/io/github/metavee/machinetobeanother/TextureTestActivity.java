@@ -33,6 +33,7 @@ import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.WindowManager;
+import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
 
@@ -124,6 +125,9 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
 
     // Scanned (or default) Cardboard viewer calibration driving the per-eye projections.
     private CardboardProfile profile;
+
+    // Log/show the computed calibration geometry once, to help diagnose FOV/positioning.
+    private boolean diagnosticsShown = false;
 
     // Lens barrel-distortion post-process, and the per-eye rendering/distortion parameters
     // (rendered vs. physical-screen FOV tangents) it needs to build its distortion mesh.
@@ -376,7 +380,13 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
                         return true;
                     }
                 });
-        glView.setOnTouchListener((v, event) -> gestureDetector.onTouchEvent(event));
+        // Return true so we keep receiving the whole gesture: if we returned the detector's
+        // result, the initial DOWN (false from SimpleOnGestureListener) would stop delivery
+        // and onSingleTapUp would never fire.
+        glView.setOnTouchListener((v, event) -> {
+            gestureDetector.onTouchEvent(event);
+            return true;
+        });
     }
 
     @Override
@@ -490,6 +500,30 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
                 distortionRenderer.disable();
             }
         }
+
+        logCalibrationDiagnostics(dm, xdpi, ydpi, screenWidthMeters, screenHeightMeters);
+    }
+
+    /**
+    * Logs (and briefly shows) the derived screen geometry and per-eye field of view once, to
+    * help diagnose whether the DisplayMetrics-based physical size is accurate. Remove once the
+    * calibration is dialed in.
+    */
+    private void logCalibrationDiagnostics(DisplayMetrics dm, float xdpi, float ydpi,
+                                          float screenWidthMeters, float screenHeightMeters) {
+        if (diagnosticsShown || eyeParamsArr[0] == null) {
+            return;
+        }
+        diagnosticsShown = true;
+        CardboardProfile.EyeParams ep = eyeParamsArr[0];
+        double hFov = Math.toDegrees(Math.atan(ep.sxLeft) + Math.atan(ep.sxRight));
+        double vFov = Math.toDegrees(Math.atan(ep.sxBottom) + Math.atan(ep.sxTop));
+        final String msg = String.format(java.util.Locale.US,
+                "screen %.0fx%.0f mm (%dx%d px, dpi %.0fx%.0f); left-eye FOV H=%.0f° V=%.0f°",
+                screenWidthMeters * 1000f, screenHeightMeters * 1000f,
+                dm.widthPixels, dm.heightPixels, xdpi, ydpi, hFov, vFov);
+        Log.i(TAG, "Calibration diagnostics: " + msg);
+        runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
     }
 
     /**
@@ -637,6 +671,23 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
                 drawRect();
             }
         }
+
+        drawAlignmentLine();
+    }
+
+    /**
+    * Draws a thin white vertical line down the center of the screen, between the two eyes, to
+    * help center the phone in the Cardboard viewer.
+    */
+    private void drawAlignmentLine() {
+        int lineWidth = Math.max(2, surfaceWidth / 400);
+        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+        GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glScissor((surfaceWidth - lineWidth) / 2, 0, lineWidth, surfaceHeight);
+        GLES20.glClearColor(1f, 1f, 1f, 1f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glClearColor(0.1f, 0.1f, 0.1f, 0.5f); // restore the normal frame clear color
     }
 
     /**
