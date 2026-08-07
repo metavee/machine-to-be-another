@@ -521,12 +521,12 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
 
         // Physical screen size in meters, needed to map the profile's metric distances onto
         // this display. We size it from the actual GL surface (which, in immersive mode, spans
-        // the full physical screen) times the reported DPI. Using the surface pixels rather
-        // than DisplayMetrics.widthPixels avoids the system-bar insets that would otherwise
-        // shrink and shift the mapping.
-        DisplayMetrics dm = getResources().getDisplayMetrics();
-        float xdpi = dm.xdpi > 0 ? dm.xdpi : dm.densityDpi;
-        float ydpi = dm.ydpi > 0 ? dm.ydpi : dm.densityDpi;
+        // the full physical screen) times the DPI. Using the surface pixels rather than
+        // DisplayMetrics.widthPixels avoids the system-bar insets that would otherwise shrink
+        // and shift the mapping.
+        float[] dpi = physicalDpi();
+        float xdpi = dpi[0];
+        float ydpi = dpi[1];
         float screenWidthMeters = surfaceWidth / xdpi * 0.0254f;
         float screenHeightMeters = surfaceHeight / ydpi * 0.0254f;
 
@@ -562,9 +562,28 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
     }
 
     /**
+    * The physical screen DPI to use. Some phones report an inaccurate {@code
+    * DisplayMetrics.xdpi/ydpi} (e.g. the Pixel 6 reports ~429 for a true 411 ppi panel),
+    * which throws off the whole FOV/geometry. Correct known devices here (the true panel
+    * ppi); fall back to the reported DPI otherwise. Extend this list if a device's calibration
+    * looks slightly zoomed/off — the calibration diagnostics toast shows the model and DPI.
+    */
+    private float[] physicalDpi() {
+        switch (Build.MODEL) {
+            case "Pixel 6": return new float[] {411f, 411f};
+            case "Pixel 7": return new float[] {416f, 416f};
+            default:
+                DisplayMetrics dm = getResources().getDisplayMetrics();
+                float x = dm.xdpi > 0 ? dm.xdpi : dm.densityDpi;
+                float y = dm.ydpi > 0 ? dm.ydpi : dm.densityDpi;
+                return new float[] {x, y};
+        }
+    }
+
+    /**
     * Logs (and briefly shows) the derived screen geometry and per-eye field of view once, to
-    * help diagnose whether the DisplayMetrics-based physical size is accurate. Remove once the
-    * calibration is dialed in.
+    * help diagnose whether the physical size is accurate. Remove once the calibration is
+    * dialed in.
     */
     private void logCalibrationDiagnostics(float xdpi, float ydpi,
                                           float screenWidthMeters, float screenHeightMeters) {
@@ -576,8 +595,8 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
         double hFov = Math.toDegrees(Math.atan(ep.sxLeft) + Math.atan(ep.sxRight));
         double vFov = Math.toDegrees(Math.atan(ep.sxBottom) + Math.atan(ep.sxTop));
         final String msg = String.format(java.util.Locale.US,
-                "screen %.0fx%.0f mm (surface %dx%d px, dpi %.0fx%.0f); left-eye FOV H=%.0f° V=%.0f°",
-                screenWidthMeters * 1000f, screenHeightMeters * 1000f,
+                "%s: screen %.0fx%.0f mm (surface %dx%d px, dpi %.0fx%.0f); left-eye FOV H=%.0f° V=%.0f°",
+                Build.MODEL, screenWidthMeters * 1000f, screenHeightMeters * 1000f,
                 surfaceWidth, surfaceHeight, xdpi, ydpi, hFov, vFov);
         Log.i(TAG, "Calibration diagnostics: " + msg);
         runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
