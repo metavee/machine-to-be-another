@@ -195,32 +195,44 @@ public final class CardboardProfile {
         return p;
     }
 
+    /** Per-eye tan-angle extents for both the rendered texture and the physical screen. */
+    public static final class EyeParams {
+        // Rendered (off-screen texture) FOV tangents — the distorted, wider FOV. Positive
+        // magnitudes measured from the lens axis toward each edge.
+        public float txLeft, txRight, txBottom, txTop;
+        // Physical screen FOV tangents (undistorted) — where each rendered direction lands on
+        // the display. Positive magnitudes from the lens axis.
+        public float sxLeft, sxRight, sxBottom, sxTop;
+    }
+
     /**
-     * Computes the asymmetric view frustum for one eye, in the near-plane coordinate space
-     * expected by {@link android.opengl.Matrix#frustumM}.
+     * Computes the per-eye rendering + distortion parameters from the viewer geometry,
+     * following the Cardboard SDK model:
      *
-     * <p>The frustum is derived from the physical geometry: each lens sits {@code
-     * interLensDistance / 2} from the screen center horizontally and {@code
-     * trayToLensDistance} from the bottom (per {@code verticalAlignment}). The half-angle to
-     * each edge of the eye's half of the screen is {@code atan(distanceToEdge /
-     * screenToLensDistance)}, clamped by the lens's maximum FOV. This centers each eye's
-     * image under its lens and scales it to the viewer — exactly the calibration that makes a
-     * given headset look right.
+     * <ul>
+     *   <li>The physical screen FOV tangent to each edge of the eye's half of the display is
+     *       {@code edgeDistance / screenToLensDistance}. Each lens sits {@code
+     *       interLensDistance / 2} from the screen center horizontally and {@code lensY} from
+     *       the bottom (per {@code verticalAlignment}).</li>
+     *   <li>The eye is rendered at a wider "distorted" FOV, {@code Distort(screenTangent)},
+     *       clamped by the lens's maximum FOV; the off-screen texture spans this FOV.</li>
+     *   <li>{@link DistortionRenderer} then maps that texture back onto the physical screen
+     *       via the inverse distortion, so the lens's pincushion cancels out and the perceived
+     *       FOV equals the physical screen FOV (i.e. no zoom, straight lines stay straight).</li>
+     * </ul>
      *
      * @param eye 0 = left, 1 = right.
-     * @param near near-plane distance.
      * @param screenWidthMeters  physical width of the screen (long/landscape dimension).
      * @param screenHeightMeters physical height of the screen (short/landscape dimension).
-     * @return {left, right, bottom, top} at the near plane, or null if geometry is unusable
-     *         (caller should fall back to a default symmetric perspective).
+     * @return the eye parameters, or null if the geometry is unusable (caller should fall back
+     *         to a plain symmetric perspective with no distortion).
      */
-    public float[] eyeFrustum(int eye, float near, float screenWidthMeters, float screenHeightMeters) {
+    public EyeParams eyeParams(int eye, float screenWidthMeters, float screenHeightMeters) {
         if (screenToLensDistance <= 0f || screenWidthMeters <= 0f || screenHeightMeters <= 0f) {
             return null;
         }
-        float halfInter = interLensDistance / 2f;
-        float outerDist = screenWidthMeters / 2f - halfInter; // lens center -> outer vertical edge
-        float innerDist = halfInter;                           // lens center -> screen center
+        float outerDist = screenWidthMeters / 2f - interLensDistance / 2f;
+        float innerDist = interLensDistance / 2f;
         if (outerDist <= 0f) {
             return null;
         }
@@ -244,29 +256,52 @@ public final class CardboardProfile {
             return null;
         }
 
-        float outerA = (float) Math.atan(outerDist / screenToLensDistance);
-        float innerA = (float) Math.atan(innerDist / screenToLensDistance);
-        float bottomA = (float) Math.atan(bottomDist / screenToLensDistance);
-        float topA = (float) Math.atan(topDist / screenToLensDistance);
+        // Physical screen FOV tangents (undistorted).
+        float sOuter = outerDist / screenToLensDistance;
+        float sInner = innerDist / screenToLensDistance;
+        float sBottom = bottomDist / screenToLensDistance;
+        float sTop = topDist / screenToLensDistance;
 
-        if (fovAngles != null && fovAngles.length == 4) {
-            outerA = Math.min(outerA, (float) Math.toRadians(fovAngles[0]));
-            innerA = Math.min(innerA, (float) Math.toRadians(fovAngles[1]));
-            bottomA = Math.min(bottomA, (float) Math.toRadians(fovAngles[2]));
-            topA = Math.min(topA, (float) Math.toRadians(fovAngles[3]));
-        }
+        // Distorted (rendered) FOV tangents, clamped by the lens's maximum FOV.
+        float tOuter = distortedTangent(sOuter, fovAngle(0));
+        float tInner = distortedTangent(sInner, fovAngle(1));
+        float tBottom = distortedTangent(sBottom, fovAngle(2));
+        float tTop = distortedTangent(sTop, fovAngle(3));
 
-        float l, r;
-        if (eye == 0) { // left eye: outer edge is on the left
-            l = -(float) Math.tan(outerA) * near;
-            r = (float) Math.tan(innerA) * near;
+        EyeParams p = new EyeParams();
+        p.sxBottom = sBottom;
+        p.sxTop = sTop;
+        p.txBottom = tBottom;
+        p.txTop = tTop;
+        if (eye == 0) { // left eye: outer edge on the left
+            p.sxLeft = sOuter;  p.sxRight = sInner;
+            p.txLeft = tOuter;  p.txRight = tInner;
         } else {        // right eye: mirror horizontally
-            l = -(float) Math.tan(innerA) * near;
-            r = (float) Math.tan(outerA) * near;
+            p.sxLeft = sInner;  p.sxRight = sOuter;
+            p.txLeft = tInner;  p.txRight = tOuter;
         }
-        float b = -(float) Math.tan(bottomA) * near;
-        float t = (float) Math.tan(topA) * near;
-        return new float[] {l, r, b, t};
+        return p;
+    }
+
+    private float fovAngle(int index) {
+        return (fovAngles != null && fovAngles.length == 4) ? fovAngles[index] : 90f;
+    }
+
+    /** Radial distortion along one axis, {@code s * (1 + k1 s^2 + k2 s^4 + ...)}, clamped by a
+     *  maximum FOV angle (degrees). */
+    private float distortedTangent(float screenTangent, float maxFovDegrees) {
+        float r2 = screenTangent * screenTangent;
+        float factor = 1f;
+        if (distortionCoeffs != null) {
+            float rPow = 1f;
+            for (float k : distortionCoeffs) {
+                rPow *= r2;
+                factor += k * rPow;
+            }
+        }
+        float distorted = screenTangent * factor;
+        float maxTan = (float) Math.tan(Math.toRadians(maxFovDegrees));
+        return Math.min(distorted, maxTan);
     }
 
     // --- tiny protobuf wire helpers ---------------------------------------------------

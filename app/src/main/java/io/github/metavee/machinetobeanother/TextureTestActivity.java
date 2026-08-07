@@ -32,6 +32,7 @@ import android.util.Log;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.Surface;
+import android.view.WindowManager;
 
 import androidx.appcompat.app.AppCompatActivity;
 
@@ -124,10 +125,10 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
     // Scanned (or default) Cardboard viewer calibration driving the per-eye projections.
     private CardboardProfile profile;
 
-    // Lens barrel-distortion post-process, and the per-eye near-plane frustum extents
-    // ({l, r, b, t}) it needs to build its distortion mesh.
+    // Lens barrel-distortion post-process, and the per-eye rendering/distortion parameters
+    // (rendered vs. physical-screen FOV tangents) it needs to build its distortion mesh.
     private DistortionRenderer distortionRenderer;
-    private final float[][] eyeFrustumExtents = new float[2][];
+    private final CardboardProfile.EyeParams[] eyeParamsArr = new CardboardProfile.EyeParams[2];
 
     private FloatBuffer rectVertices;
 
@@ -351,6 +352,10 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
     public void initializeGlView() {
         setContentView(R.layout.common_ui);
 
+        // Keep the screen awake while the stereo view is active (the removed GvrView used to
+        // do this for us). Cleared automatically when the activity is no longer visible.
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
         glView = (GLSurfaceView) findViewById(R.id.gl_view);
         glView.setEGLContextClientVersion(2);
         glView.setEGLConfigChooser(8, 8, 8, 8, 16, 8);
@@ -459,22 +464,31 @@ public class TextureTestActivity extends AppCompatActivity implements GLSurfaceV
         float screenHeightMeters = dm.heightPixels / ydpi * 0.0254f;
 
         for (int eye = 0; eye < 2; eye++) {
-            float[] f = (profile != null)
-                    ? profile.eyeFrustum(eye, Z_NEAR, screenWidthMeters, screenHeightMeters)
+            CardboardProfile.EyeParams ep = (profile != null)
+                    ? profile.eyeParams(eye, screenWidthMeters, screenHeightMeters)
                     : null;
-            if (f == null) {
+            eyeParamsArr[eye] = ep;
+            if (ep != null) {
+                // Render at the distorted (wider) FOV; the distortion mesh brings it back to
+                // the physical screen FOV.
+                Matrix.frustumM(eyePerspective[eye], 0,
+                        -ep.txLeft * Z_NEAR, ep.txRight * Z_NEAR,
+                        -ep.txBottom * Z_NEAR, ep.txTop * Z_NEAR, Z_NEAR, Z_FAR);
+            } else {
                 // Symmetric default frustum when the profile geometry is unusable.
                 float t = (float) Math.tan(Math.toRadians(DEFAULT_FOV_Y / 2.0)) * Z_NEAR;
                 float r = t * eyeAspect;
-                f = new float[] {-r, r, -t, t};
+                Matrix.frustumM(eyePerspective[eye], 0, -r, r, -t, t, Z_NEAR, Z_FAR);
             }
-            eyeFrustumExtents[eye] = f;
-            Matrix.frustumM(eyePerspective[eye], 0, f[0], f[1], f[2], f[3], Z_NEAR, Z_FAR);
         }
 
         if (distortionRenderer != null) {
-            distortionRenderer.configure(surfaceWidth / 2, surfaceHeight, eyeFrustumExtents,
-                    Z_NEAR, profile != null ? profile.distortionCoeffs : null);
+            if (eyeParamsArr[0] != null && eyeParamsArr[1] != null) {
+                distortionRenderer.configure(surfaceWidth / 2, surfaceHeight, eyeParamsArr,
+                        profile != null ? profile.distortionCoeffs : null);
+            } else {
+                distortionRenderer.disable();
+            }
         }
     }
 

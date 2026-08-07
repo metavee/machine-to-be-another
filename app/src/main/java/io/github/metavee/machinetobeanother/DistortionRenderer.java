@@ -14,21 +14,23 @@ import java.nio.FloatBuffer;
 import java.nio.ShortBuffer;
 
 /**
- * Lens barrel-distortion post-process.
+ * Lens barrel-distortion post-process, following the Google Cardboard SDK model.
  *
- * <p>Each eye is first rendered into an off-screen framebuffer (FBO) at the eye's field of
- * view. This class then draws that FBO onto the eye's half of the screen through a
- * pre-distorted mesh, so that the headset lens's (pincushion) distortion cancels out and
- * straight lines look straight.
+ * <p>Each eye is first rendered into an off-screen framebuffer (FBO) at the eye's <em>distorted</em>
+ * (wider) field of view — see {@link CardboardProfile#eyeParams}. This class then draws that FBO
+ * onto the eye's half of the screen through a distortion mesh so the headset lens's (pincushion)
+ * distortion cancels out and straight lines look straight, with the perceived field of view equal
+ * to the physical screen (no zoom).
  *
- * <p>The mesh is generated once per configuration. For each screen grid point we convert to a
- * tan-angle on the display, invert the Cardboard radial distortion polynomial
- * ({@code r * (1 + k1*r^2 + k2*r^4)}) to find the matching direction in the undistorted
- * render, and use that as the texture coordinate. Inverting the (expanding) distortion means
- * every screen pixel samples a point strictly inside the rendered FOV, so the display is fully
- * covered with no black edges and the FBO needs no extra margin.
- *
- * <p>With zero distortion coefficients the mesh reduces to an identity blit.
+ * <p>The mesh is generated once per configuration. It is a uniform grid in <em>texture</em>
+ * (rendered-FOV) space; each vertex's screen position is the inverse radial distortion of its
+ * texture tan-angle, mapped onto the physical screen extent:
+ * <pre>
+ *   p_texture = uniform grid over the rendered FOV tangents
+ *   p_screen  = DistortInverse(p_texture)                        // radial
+ *   ndc       = 2 * (p_screen + screenEyeOffset) / screenSpan - 1
+ * </pre>
+ * With zero distortion coefficients this reduces to an identity blit.
  */
 public final class DistortionRenderer {
 
@@ -51,12 +53,16 @@ public final class DistortionRenderer {
     private int eyeWidth;
     private int eyeHeight;
 
-    // Shared geometry: screen-space vertex positions and triangle indices are identical for
-    // both eyes; only the (distorted) texture coordinates differ.
-    private FloatBuffer positionBuffer;
+    // Per-eye mesh: screen positions and texture coordinates. The triangle indices (grid
+    // topology) are shared.
+    private final FloatBuffer[] positionBuffers = new FloatBuffer[2];
+    private final FloatBuffer[] texCoordBuffers = new FloatBuffer[2];
     private ShortBuffer indexBuffer;
     private int indexCount;
-    private final FloatBuffer[] texCoordBuffers = new FloatBuffer[2];
+
+    // Distortion polynomial coefficients (k1, k2) for the inverse used in the mesh.
+    private float k1;
+    private float k2;
 
     private boolean ready;
 
@@ -82,21 +88,24 @@ public final class DistortionRenderer {
         textureUniform = GLES20.glGetUniformLocation(program, "u_Texture");
     }
 
+    /** Marks the distortion pass as unavailable (caller should render straight to screen). */
+    public void disable() {
+        ready = false;
+    }
+
     /**
-     * (Re)creates the off-screen buffer and rebuilds the distortion meshes.
+     * (Re)creates the off-screen buffer and rebuilds the per-eye distortion meshes.
      *
-     * @param eyeWidthPx        width of one eye viewport in pixels (half the surface width).
-     * @param eyeHeightPx       height of the eye viewport in pixels (the surface height).
-     * @param eyeFrustumExtents per-eye near-plane frustum {l, r, b, t}; index 0 left, 1 right.
-     * @param near              near-plane distance used to build those extents.
-     * @param distortionCoeffs  radial polynomial coefficients (k1, k2, ...); may be null/empty.
+     * @param eyeWidthPx       width of one eye viewport in pixels (half the surface width).
+     * @param eyeHeightPx      height of the eye viewport in pixels (the surface height).
+     * @param eyes             per-eye parameters (index 0 left, 1 right); must both be non-null.
+     * @param distortionCoeffs radial polynomial coefficients (k1, k2, ...); may be null/empty.
      */
-    public void configure(int eyeWidthPx, int eyeHeightPx, float[][] eyeFrustumExtents,
-                          float near, float[] distortionCoeffs) {
+    public void configure(int eyeWidthPx, int eyeHeightPx, CardboardProfile.EyeParams[] eyes,
+                          float[] distortionCoeffs) {
         ready = false;
         if (eyeWidthPx <= 0 || eyeHeightPx <= 0
-                || eyeFrustumExtents == null
-                || eyeFrustumExtents[0] == null || eyeFrustumExtents[1] == null) {
+                || eyes == null || eyes[0] == null || eyes[1] == null) {
             return;
         }
 
@@ -106,12 +115,12 @@ public final class DistortionRenderer {
             createFbo(eyeWidth, eyeHeight);
         }
 
-        float k1 = (distortionCoeffs != null && distortionCoeffs.length > 0) ? distortionCoeffs[0] : 0f;
-        float k2 = (distortionCoeffs != null && distortionCoeffs.length > 1) ? distortionCoeffs[1] : 0f;
+        k1 = (distortionCoeffs != null && distortionCoeffs.length > 0) ? distortionCoeffs[0] : 0f;
+        k2 = (distortionCoeffs != null && distortionCoeffs.length > 1) ? distortionCoeffs[1] : 0f;
 
-        buildSharedGeometry();
+        buildIndices();
         for (int eye = 0; eye < 2; eye++) {
-            texCoordBuffers[eye] = buildTexCoords(eyeFrustumExtents[eye], near, k1, k2);
+            buildMesh(eye, eyes[eye]);
         }
         ready = true;
     }
@@ -143,7 +152,7 @@ public final class DistortionRenderer {
         GLES20.glUniform1i(textureUniform, 0);
 
         GLES20.glEnableVertexAttribArray(positionParam);
-        GLES20.glVertexAttribPointer(positionParam, 2, GLES20.GL_FLOAT, false, 0, positionBuffer);
+        GLES20.glVertexAttribPointer(positionParam, 2, GLES20.GL_FLOAT, false, 0, positionBuffers[eye]);
 
         GLES20.glEnableVertexAttribArray(texCoordParam);
         GLES20.glVertexAttribPointer(texCoordParam, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffers[eye]);
@@ -156,21 +165,10 @@ public final class DistortionRenderer {
 
     // --- mesh construction ------------------------------------------------------------
 
-    private void buildSharedGeometry() {
-        if (positionBuffer != null) {
+    private void buildIndices() {
+        if (indexBuffer != null) {
             return; // grid topology is fixed; build once.
         }
-        int verts = (GRID + 1) * (GRID + 1);
-        positionBuffer = allocFloats(verts * 2);
-        for (int j = 0; j <= GRID; j++) {
-            float sy = 2f * j / GRID - 1f;
-            for (int i = 0; i <= GRID; i++) {
-                float sx = 2f * i / GRID - 1f;
-                positionBuffer.put(sx).put(sy);
-            }
-        }
-        positionBuffer.position(0);
-
         short[] indices = new short[GRID * GRID * 6];
         int n = 0;
         int stride = GRID + 1;
@@ -192,56 +190,74 @@ public final class DistortionRenderer {
         indexBuffer.position(0);
     }
 
-    private FloatBuffer buildTexCoords(float[] frustum, float near, float k1, float k2) {
-        float tanL = frustum[0] / near;
-        float tanR = frustum[1] / near;
-        float tanB = frustum[2] / near;
-        float tanT = frustum[3] / near;
-
+    private void buildMesh(int eye, CardboardProfile.EyeParams ep) {
         int verts = (GRID + 1) * (GRID + 1);
-        FloatBuffer buf = allocFloats(verts * 2);
+        FloatBuffer pos = allocFloats(verts * 2);
+        FloatBuffer tex = allocFloats(verts * 2);
+
+        float texWidth = ep.txLeft + ep.txRight;
+        float texHeight = ep.txBottom + ep.txTop;
+        float screenWidth = ep.sxLeft + ep.sxRight;
+        float screenHeight = ep.sxBottom + ep.sxTop;
+
         for (int j = 0; j <= GRID; j++) {
-            float fy = (float) j / GRID;
-            float sigmaY = tanB + fy * (tanT - tanB);
+            float v = (float) j / GRID;
             for (int i = 0; i <= GRID; i++) {
-                float fx = (float) i / GRID;
-                float sigmaX = tanL + fx * (tanR - tanL);
+                float u = (float) i / GRID;
 
-                // Screen tan-angle radius -> undistorted (rendered) tan-angle radius.
-                float sigma = (float) Math.sqrt(sigmaX * sigmaX + sigmaY * sigmaY);
-                float scale = 1f;
-                if (sigma > 1e-6f) {
-                    scale = distortInverse(sigma, k1, k2) / sigma;
-                }
-                float thetaX = sigmaX * scale;
-                float thetaY = sigmaY * scale;
+                // Uniform grid over the rendered (distorted) FOV, in tan-angle relative to the
+                // lens axis.
+                float pxTexture = u * texWidth - ep.txLeft;
+                float pyTexture = v * texHeight - ep.txBottom;
 
-                float u = (thetaX - tanL) / (tanR - tanL);
-                float v = (thetaY - tanB) / (tanT - tanB);
-                buf.put(u).put(v);
+                // Inverse-distort to the physical screen tan-angle position (radial).
+                float[] pScreen = distortInverse(pxTexture, pyTexture, k1, k2);
+
+                float uScreen = (pScreen[0] + ep.sxLeft) / screenWidth;
+                float vScreen = (pScreen[1] + ep.sxBottom) / screenHeight;
+
+                pos.put(2f * uScreen - 1f).put(2f * vScreen - 1f);
+                tex.put(u).put(v);
             }
         }
-        buf.position(0);
-        return buf;
+        pos.position(0);
+        tex.position(0);
+        positionBuffers[eye] = pos;
+        texCoordBuffers[eye] = tex;
     }
 
     /**
-     * Inverts {@code distort(t) = t * (1 + k1*t^2 + k2*t^4)}: given a distorted (screen)
-     * radius, returns the undistorted radius, via Newton's method.
+     * Inverse of the radial distortion {@code r -> r * (1 + k1 r^2 + k2 r^4)}: given a point in
+     * distorted (rendered) tan-angle space, returns the corresponding undistorted (screen)
+     * point. Uses the secant method, matching the Cardboard SDK.
      */
-    private static float distortInverse(float radius, float k1, float k2) {
-        if (radius <= 0f) {
-            return 0f;
+    private static float[] distortInverse(float x, float y, float k1, float k2) {
+        float radius = (float) Math.sqrt(x * x + y * y);
+        if (radius < 1e-9f) {
+            return new float[] {0f, 0f};
         }
-        float t = radius; // good initial guess since the distortion is mild
-        for (int iter = 0; iter < 10; iter++) {
-            float t2 = t * t;
-            float t4 = t2 * t2;
-            float f = t * (1f + k1 * t2 + k2 * t4) - radius;
-            float df = 1f + 3f * k1 * t2 + 5f * k2 * t4;
-            t -= f / df;
+        float r0 = radius / 2f;
+        float r1 = radius / 3f;
+        float dr0 = radius - distortRadius(r0, k1, k2);
+        int iter = 0;
+        while (Math.abs(r1 - r0) > 1e-4f && iter++ < 20) {
+            float dr1 = radius - distortRadius(r1, k1, k2);
+            float denom = dr1 - dr0;
+            if (Math.abs(denom) < 1e-9f) {
+                break;
+            }
+            float r2 = r1 - dr1 * ((r1 - r0) / denom);
+            r0 = r1;
+            r1 = r2;
+            dr0 = dr1;
         }
-        return t;
+        float scale = r1 / radius;
+        return new float[] {scale * x, scale * y};
+    }
+
+    private static float distortRadius(float r, float k1, float k2) {
+        float r2 = r * r;
+        return r * (1f + k1 * r2 + k2 * r2 * r2);
     }
 
     // --- GL helpers -------------------------------------------------------------------
